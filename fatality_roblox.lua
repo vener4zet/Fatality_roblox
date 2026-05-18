@@ -542,7 +542,7 @@ jitterToggle.Option:AddDropdown({
 -- ==================== FAKE LAG (серверная часть – прозрачный силуэт с обводкой) ====================
 local Player = Players.LocalPlayer
 local fakeLagEnabled = false
-local fakeLagDelay = 0.5         -- задержка в секундах
+local fakeLagLimit = 5            -- Лимит тиков (значение от 1 до 14)
 local RealChar = nil
 local FakeChar = nil
 local fakeLagConnections = {}
@@ -718,7 +718,7 @@ local function EnableFakeLag()
         if fakeLagEnabled and fakeHum then pcall(function() fakeHum.Jump = true end) end
     end))
 
-    -- Кадровое отключение коллизий между оригиналом и клоном
+    -- Кадровое отключение коллизий между оригиналу и клоном
     table.insert(fakeLagConnections, RunService.Heartbeat:Connect(function()
         if not fakeLagEnabled or not FakeChar or not RealChar then return end
         for _, part in ipairs(FakeChar:GetDescendants()) do
@@ -770,7 +770,8 @@ local function EnableFakeLag()
     -- ЦИКЛ ЗАДЕРЖКИ СЕРВЕРА (Реальный персонаж-призрак скачками догоняет нас)
     local function updateRealChar()
         while fakeLagEnabled do
-            task.wait(fakeLagDelay)
+            -- Конвертируем лимит (1-14) в секунды, где 14 = 1.5 секунды
+            task.wait(fakeLagLimit * (1.5 / 14))
             if fakeLagEnabled and RealChar and RealChar:FindFirstChild("HumanoidRootPart") and FakeChar and FakeChar:FindFirstChild("HumanoidRootPart") then
                 local targetCF = FakeChar.HumanoidRootPart.CFrame
                 RealChar.HumanoidRootPart.CFrame = targetCF
@@ -803,13 +804,15 @@ local fakeLagToggle = fakeLagSection:AddToggle({
 })
 
 fakeLagToggle.Option:AddSlider({
-    Name = "Delay (s)",
-    Default = 0.5,
-    Min = 0.1,
-    Max = 1.0,
-    Rounding = 1,
-    Type = "s",
-    Callback = function(val) fakeLagDelay = val end
+    Name = "Fakelag limit",
+    Default = 5,
+    Min = 1,
+    Max = 14,
+    Rounding = 0,
+    Type = "",
+    Callback = function(val) 
+        fakeLagLimit = val 
+    end
 })
 -- ==================== ESP ====================
 local ESP = {
