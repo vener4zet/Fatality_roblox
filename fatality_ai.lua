@@ -340,7 +340,7 @@ _G.unloadAIM = unloadAIM
 local antiAimEnabled = false
 local currentMode = "static"
 local jitterEnabled = false
-local jitterMode = "Jitter"
+local jitterMode = "Center"      -- Переименовано по умолчанию с "Jitter" на "Center"
 local spinSpeed = 360
 local jitterRange = 30
 local jitterInterval = 0
@@ -349,6 +349,10 @@ local yawEnabled = false
 local yawAngle = 0
 local antiAimConnection = nil
 local atTargetFallbackAngle = 0 -- Переменная для медленного вращения, если нет цели
+
+-- Индексы шагов для многонаправленных джиттеров
+local way3Index = 0
+local way5Index = 0
 
 local function getClosestPlayer(maxDist)
     local character = LocalPlayer.Character
@@ -451,11 +455,38 @@ local function antiAimLoop(dt)
         else
             applyJitter = true
         end
+        
         if applyJitter then
-            if jitterMode == "Jitter" then
+            if jitterMode == "Center" then
+                -- Рандомный разброс в пределах радиуса вокруг центра
                 yawOffset = (math.random() * 2 - 1) * math.rad(jitterRange)
             elseif jitterMode == "Random" then
+                -- Полный хаотичный разворот на 360 градусов
                 yawOffset = math.random() * 2 * math.pi
+            elseif jitterMode == "3-way" then
+                -- Поочередно: Лево -> Центр -> Право
+                way3Index = (way3Index + 1) % 3
+                if way3Index == 0 then
+                    yawOffset = -math.rad(jitterRange)
+                elseif way3Index == 1 then
+                    yawOffset = 0
+                else
+                    yawOffset = math.rad(jitterRange)
+                end
+            elseif jitterMode == "5-way" then
+                -- Поочередно 5 точек распределения угла
+                way5Index = (way5Index + 1) % 5
+                if way5Index == 0 then
+                    yawOffset = -math.rad(jitterRange)
+                elseif way5Index == 1 then
+                    yawOffset = -math.rad(jitterRange / 2)
+                elseif way5Index == 2 then
+                    yawOffset = 0
+                elseif way5Index == 3 then
+                    yawOffset = math.rad(jitterRange / 2)
+                else
+                    yawOffset = math.rad(jitterRange)
+                end
             end
             finalCF = finalCF * CFrame.Angles(0, yawOffset, 0)
         end
@@ -547,8 +578,8 @@ jitterToggle.Option:AddSlider({
 })
 jitterToggle.Option:AddDropdown({
     Name = "Mode",
-    Values = {"Jitter", "Random"},
-    Default = "Jitter",
+    Values = {"Center", "3-way", "5-way", "Random"}, -- Обновленный список режимов в UI
+    Default = "Center",
     Callback = function(val) jitterMode = val end
 })
 -- ==================== FAKE LAG (серверная часть – прозрачный силуэт с обводкой) ====================
