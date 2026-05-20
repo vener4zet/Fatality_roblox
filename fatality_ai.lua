@@ -348,14 +348,15 @@ local jitterAccum = 0
 local yawEnabled = false
 local yawAngle = 0
 local antiAimConnection = nil
+local atTargetFallbackAngle = 0 -- Переменная для медленного вращения, если нет цели
 
-local function getClosestPlayer()
+local function getClosestPlayer(maxDist)
     local character = LocalPlayer.Character
     if not character then return nil end
     local root = character:FindFirstChild("HumanoidRootPart")
     if not root then return nil end
 
-    local closestDist = math.huge
+    local closestDist = maxDist or math.huge
     local closestPlayer = nil
     local myPos = root.Position
 
@@ -396,7 +397,8 @@ local function antiAimLoop(dt)
     local finalCF
 
     if currentMode == "attarget" then
-        local targetPlayer = getClosestPlayer()
+        -- Ищем цель только в радиусе 500 студов
+        local targetPlayer = getClosestPlayer(500) 
         if targetPlayer then
             local targetChar = targetPlayer.Character
             if targetChar then
@@ -411,7 +413,17 @@ local function antiAimLoop(dt)
                 finalCF = currentCF
             end
         else
-            finalCF = currentCF
+            -- FALLBACK: Если цели нет, медленно крутимся (45 градусов в секунду)
+            atTargetFallbackAngle = (atTargetFallbackAngle + math.rad(45 * dt)) % (math.pi * 2)
+            local camera = Workspace.CurrentCamera
+            if camera then
+                local camLook = camera.CFrame.LookVector
+                local dir = Vector3.new(camLook.X, 0, camLook.Z).Unit
+                local baseCF = CFrame.lookAt(pos, pos + dir)
+                finalCF = baseCF * CFrame.Angles(0, atTargetFallbackAngle, 0)
+            else
+                finalCF = currentCF * CFrame.Angles(0, math.rad(45 * dt), 0)
+            end
         end
     elseif currentMode == "spin" then
         local rotStep = math.rad(spinSpeed * dt)
@@ -540,18 +552,19 @@ jitterToggle.Option:AddDropdown({
     Callback = function(val) jitterMode = val end
 })
 -- ==================== FAKE LAG (серверная часть – прозрачный силуэт с обводкой) ====================
-local Player = Players.LocalPlayer
+local Player = game:GetService("Players").LocalPlayer
 local fakeLagEnabled = false
-local fakeLagLimit = 5            -- Лимит тиков (значение от 1 до 14)
+local fakeLagLimit = 5            
 local RealChar = nil
 local FakeChar = nil
 local fakeLagConnections = {}
 local fakeLagAnimTracks = {}
+local realLagAnimTracks = {} -- Анимации для серверной модели (с обводкой)
 local updateThread = nil
 local serverHighlight = nil
+local freezeBV = nil
 local originalWalkSpeed = 16
 
--- Копирование анимаций
 local function GetAnimID(char, name, subName)
     local animScript = char:FindFirstChild("Animate")
     if animScript then
@@ -568,6 +581,9 @@ local function StopAllAnims()
     for _, track in pairs(fakeLagAnimTracks) do
         if track then pcall(function() track:Stop(0.1) end) end
     end
+    for _, track in pairs(realLagAnimTracks) do
+        if track then pcall(function() track:Stop(0.1) end) end
+    end
 end
 
 local function DisableFakeLag()
@@ -576,18 +592,20 @@ local function DisableFakeLag()
     
     for _, conn in pairs(fakeLagConnections) do pcall(function() conn:Disconnect() end) end
     fakeLagConnections = {}
+    
+    -- Останавливаем наши Action4 анимации, чтобы оригинальный Animate снова заработал
     StopAllAnims()
     fakeLagAnimTracks = {}
+    realLagAnimTracks = {}
+    
     if updateThread then pcall(function() task.cancel(updateThread) end); updateThread = nil end
     if serverHighlight then pcall(function() serverHighlight:Destroy() end); serverHighlight = nil end
+    if freezeBV then pcall(function() freezeBV:Destroy() end); freezeBV = nil end
 
     if RealChar and RealChar:FindFirstChild("HumanoidRootPart") then
         local realHum = RealChar:FindFirstChildOfClass("Humanoid")
-        if realHum then 
-            realHum.WalkSpeed = originalWalkSpeed -- Возвращаем оригинальную скорость ходьбы
-        end
+        if realHum then realHum.WalkSpeed = originalWalkSpeed end
         
-        -- Возвращаем нормальную видимость реальному персонажу
         for _, part in ipairs(RealChar:GetDescendants()) do
             if part:IsA("BasePart") then
                 if part.Name == "HumanoidRootPart" then
@@ -599,14 +617,13 @@ local function DisableFakeLag()
             end
         end
         
-        -- Плавный возврат камеры обратно на оригинал
-        local savedCamCF = Camera.CFrame
+        local savedCamCF = workspace.CurrentCamera.CFrame
         Player.Character = RealChar
-        if realHum then Camera.CameraSubject = realHum end
+        if realHum then workspace.CurrentCamera.CameraSubject = realHum end
         task.spawn(function()
             for i = 1, 5 do
-                Camera.CFrame = savedCamCF
-                RunService.RenderStepped:Wait()
+                workspace.CurrentCamera.CFrame = savedCamCF
+                game:GetService("RunService").RenderStepped:Wait()
             end
         end)
     end
@@ -623,22 +640,14 @@ local function EnableFakeLag()
     
     local realHum = RealChar:FindFirstChildOfClass("Humanoid")
     originalWalkSpeed = realHum.WalkSpeed
+    local savedCamCF = workspace.CurrentCamera.CFrame
     
-    -- Запоминаем положение камеры, чтобы её не дергало вперед
-    local savedCamCF = Camera.CFrame
-    
-    -- 1. Делаем НАСТОЯЩЕГО персонажа лагающим полупрозрачным силуэтом
     for _, part in ipairs(RealChar:GetDescendants()) do
         if part:IsA("BasePart") then
-            if part.Name == "HumanoidRootPart" then
-                part.Transparency = 1 -- Скрываем серый квадрат
-            else
-                part.Transparency = 0.7 -- Реальное тело становится призраком
-            end
+            if part.Name == "HumanoidRootPart" then part.Transparency = 1 else part.Transparency = 0.7 end
         end
     end
     
-    -- Добавляем БЕЛУЮ ОБВОДКУ на реального персонажа (серверную позицию)
     serverHighlight = Instance.new("Highlight")
     serverHighlight.Parent = RealChar
     serverHighlight.FillColor = Color3.fromRGB(255, 255, 255)
@@ -646,80 +655,89 @@ local function EnableFakeLag()
     serverHighlight.FillTransparency = 0.7
     serverHighlight.OutlineTransparency = 0
 
-    -- 2. Создаем КЛОНА, который будет нашим видимым телом для бега вперед
     RealChar.Archivable = true
     FakeChar = RealChar:Clone()
     FakeChar.Name = "LD_Ghost_Clone"
     FakeChar.Parent = workspace
     RealChar.Archivable = false
 
-    -- Очищаем клон от старых скриптов и хайлайтов
     for _, v in pairs(FakeChar:GetDescendants()) do
         if v:IsA("LocalScript") or v:IsA("Script") then pcall(function() v:Destroy() end) end
     end
     local cloneHighlight = FakeChar:FindFirstChildOfClass("Highlight")
     if cloneHighlight then cloneHighlight:Destroy() end
 
-    -- Настраиваем КЛОНА (он должен выглядеть как нормальный полноценный игрок)
     for _, part in pairs(FakeChar:GetDescendants()) do
         if part:IsA("BasePart") then
-            part.Anchored = false   -- Даем ему физику для перемещения
-            part.CanCollide = false -- Отключаем коллизию, чтобы не спотыкаться
-            pcall(function()
-                part.CanTouch = false
-                part.CanQuery = false
-            end)
-            
-            if part.Name == "HumanoidRootPart" then
-                part.Transparency = 1 -- Защита от серого квадрата у клона
-            else
-                part.Transparency = 0 -- Клон полностью плотный и видимый!
-            end
+            part.Anchored = false
+            part.CanCollide = false
+            pcall(function() part.CanTouch = false; part.CanQuery = false end)
+            if part.Name == "HumanoidRootPart" then part.Transparency = 1 else part.Transparency = 0 end
         end
     end
 
     local fakeHum = FakeChar:FindFirstChild("Humanoid")
     local fakeRoot = FakeChar:FindFirstChild("HumanoidRootPart")
     
-    if fakeHum then
-        -- ИСПРАВЛЕНИЕ: Принудительно возвращаем клону скорость ходьбы, иначе он стоит на месте!
+    -- Загружаем анимации для клона и для сервера
+    if fakeHum and realHum then
         fakeHum.WalkSpeed = originalWalkSpeed 
         fakeHum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
         
-        local function Load(id)
+        local function Load(hum, id, isPriority)
             if not id then return nil end
             local a = Instance.new("Animation") a.AnimationId = id
-            return fakeHum:LoadAnimation(a)
+            local track = hum:LoadAnimation(a)
+            if isPriority then track.Priority = Enum.AnimationPriority.Action4 end
+            return track
         end
-        fakeLagAnimTracks.Run = Load(GetAnimID(RealChar, "run", "RunAnim") or GetAnimID(RealChar, "walk", "WalkAnim") or "rbxassetid://180426354")
-        fakeLagAnimTracks.Idle = Load(GetAnimID(RealChar, "idle", "Animation1") or "rbxassetid://180435571")
-        fakeLagAnimTracks.Jump = Load(GetAnimID(RealChar, "jump", "JumpAnim") or "rbxassetid://125750702")
-        fakeLagAnimTracks.Climb = Load(GetAnimID(RealChar, "climb", "ClimbAnim") or "rbxassetid://180436334")
+
+        local runId = GetAnimID(RealChar, "run", "RunAnim") or GetAnimID(RealChar, "walk", "WalkAnim") or "rbxassetid://180426354"
+        local idleId = GetAnimID(RealChar, "idle", "Animation1") or "rbxassetid://180435571"
+        local jumpId = GetAnimID(RealChar, "jump", "JumpAnim") or "rbxassetid://125750702"
+        local climbId = GetAnimID(RealChar, "climb", "ClimbAnim") or "rbxassetid://180436334"
+
+        -- Анимации клона
+        fakeLagAnimTracks.Run = Load(fakeHum, runId, false)
+        fakeLagAnimTracks.Idle = Load(fakeHum, idleId, false)
+        fakeLagAnimTracks.Jump = Load(fakeHum, jumpId, false)
+        fakeLagAnimTracks.Climb = Load(fakeHum, climbId, false)
+        
+        -- Анимации сервера (перекрывают сломанный Animate, не трогая его)
+        realLagAnimTracks.Run = Load(realHum, runId, true)
+        realLagAnimTracks.Idle = Load(realHum, idleId, true)
+        realLagAnimTracks.Jump = Load(realHum, jumpId, true)
+        realLagAnimTracks.Climb = Load(realHum, climbId, true)
+
         if fakeLagAnimTracks.Idle then pcall(function() fakeLagAnimTracks.Idle:Play() end) end
+        if realLagAnimTracks.Idle then pcall(function() realLagAnimTracks.Idle:Play() end) end
     end
 
-    -- Тормозим реальное тело ПОСЛЕ клонирования, чтобы клон не унаследовал скорость 0
     realHum.WalkSpeed = 0 
+    
+    -- Физическая заморозка в воздухе без отключения сетевых апдейтов (Anchored=false)
+    freezeBV = Instance.new("BodyVelocity")
+    freezeBV.Name = "FakeLagFreeze"
+    freezeBV.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+    freezeBV.Velocity = Vector3.new(0, 0, 0)
+    freezeBV.P = 100000
+    freezeBV.Parent = RealChar.HumanoidRootPart
 
-    -- Подменяем активного персонажа и фокусируем камеру
     Player.Character = FakeChar
-    if fakeHum then Camera.CameraSubject = fakeHum end
+    if fakeHum then workspace.CurrentCamera.CameraSubject = fakeHum end
 
-    -- Фиксация камеры от дергания (стабилизируем ракурс на 5 кадров подряд)
     task.spawn(function()
         for i = 1, 5 do
-            Camera.CFrame = savedCamCF
-            RunService.RenderStepped:Wait()
+            workspace.CurrentCamera.CFrame = savedCamCF
+            game:GetService("RunService").RenderStepped:Wait()
         end
     end)
 
-    -- Обработка прыжков клона
-    table.insert(fakeLagConnections, UserInputService.JumpRequest:Connect(function()
+    table.insert(fakeLagConnections, game:GetService("UserInputService").JumpRequest:Connect(function()
         if fakeLagEnabled and fakeHum then pcall(function() fakeHum.Jump = true end) end
     end))
 
-    -- Кадровое отключение коллизий между оригиналу и клоном
-    table.insert(fakeLagConnections, RunService.Heartbeat:Connect(function()
+    table.insert(fakeLagConnections, game:GetService("RunService").Heartbeat:Connect(function()
         if not fakeLagEnabled or not FakeChar or not RealChar then return end
         for _, part in ipairs(FakeChar:GetDescendants()) do
             if part:IsA("BasePart") then part.CanCollide = false end
@@ -729,52 +747,56 @@ local function EnableFakeLag()
         end
     end))
 
-    -- Управление КЛОНОМ (Теперь скорость правильная и персонаж отлично бегает)
-    table.insert(fakeLagConnections, RunService.RenderStepped:Connect(function()
+    -- Управление и синхронизация анимаций
+    table.insert(fakeLagConnections, game:GetService("RunService").RenderStepped:Connect(function()
         if not fakeLagEnabled or not FakeChar or not fakeHum or not fakeRoot then return end
         local moveDir = Vector3.new(0,0,0)
-        local camCF = Camera.CFrame
-        if UserInputService:IsKeyDown(Enum.KeyCode.W) then moveDir = moveDir + camCF.LookVector end
-        if UserInputService:IsKeyDown(Enum.KeyCode.S) then moveDir = moveDir - camCF.LookVector end
-        if UserInputService:IsKeyDown(Enum.KeyCode.A) then moveDir = moveDir - camCF.RightVector end
-        if UserInputService:IsKeyDown(Enum.KeyCode.D) then moveDir = moveDir + camCF.RightVector end
+        local camCF = workspace.CurrentCamera.CFrame
+        if game:GetService("UserInputService"):IsKeyDown(Enum.KeyCode.W) then moveDir = moveDir + camCF.LookVector end
+        if game:GetService("UserInputService"):IsKeyDown(Enum.KeyCode.S) then moveDir = moveDir - camCF.LookVector end
+        if game:GetService("UserInputService"):IsKeyDown(Enum.KeyCode.A) then moveDir = moveDir - camCF.RightVector end
+        if game:GetService("UserInputService"):IsKeyDown(Enum.KeyCode.D) then moveDir = moveDir + camCF.RightVector end
         local finalDir = Vector3.new(moveDir.X, 0, moveDir.Z)
         fakeHum:Move(finalDir.Magnitude > 0 and finalDir.Unit or Vector3.new(0,0,0), false)
 
         local velocity = fakeRoot.Velocity
         local speed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
         local isClimbing = fakeHum:GetState() == Enum.HumanoidStateType.Climbing
+        
+        -- Синхронный запуск анимаций для клона и сервера
         if isClimbing then
             if fakeLagAnimTracks.Climb and not fakeLagAnimTracks.Climb.IsPlaying then
                 StopAllAnims()
                 pcall(function() fakeLagAnimTracks.Climb:Play() end)
+                pcall(function() realLagAnimTracks.Climb:Play() end)
             end
         elseif velocity.Y > 5 then
             if fakeLagAnimTracks.Jump and not fakeLagAnimTracks.Jump.IsPlaying then
                 StopAllAnims()
                 pcall(function() fakeLagAnimTracks.Jump:Play() end)
+                pcall(function() realLagAnimTracks.Jump:Play() end)
             end
         elseif speed > 0.5 then
             if fakeLagAnimTracks.Run and not fakeLagAnimTracks.Run.IsPlaying then
                 StopAllAnims()
                 pcall(function() fakeLagAnimTracks.Run:Play() end)
+                pcall(function() realLagAnimTracks.Run:Play() end)
             end
         else
             if fakeLagAnimTracks.Idle and not fakeLagAnimTracks.Idle.IsPlaying then
                 StopAllAnims()
                 pcall(function() fakeLagAnimTracks.Idle:Play() end)
+                pcall(function() realLagAnimTracks.Idle:Play() end)
             end
         end
     end))
 
-    -- ЦИКЛ ЗАДЕРЖКИ СЕРВЕРА (Реальный персонаж-призрак скачками догоняет нас)
     local function updateRealChar()
         while fakeLagEnabled do
-            -- Конвертируем лимит (1-14) в секунды, где 14 = 1.5 секунды
             task.wait(fakeLagLimit * (1.5 / 14))
             if fakeLagEnabled and RealChar and RealChar:FindFirstChild("HumanoidRootPart") and FakeChar and FakeChar:FindFirstChild("HumanoidRootPart") then
-                local targetCF = FakeChar.HumanoidRootPart.CFrame
-                RealChar.HumanoidRootPart.CFrame = targetCF
+                -- Телепортация серверной модели к клону (freezeBV удержит её в воздухе между тиками)
+                RealChar.HumanoidRootPart.CFrame = FakeChar.HumanoidRootPart.CFrame
                 RealChar.HumanoidRootPart.Velocity = Vector3.new(0,0,0)
             end
         end
@@ -795,11 +817,7 @@ local fakeLagToggle = fakeLagSection:AddToggle({
     Default = false,
     Option = true,
     Callback = function(val)
-        if val then
-            EnableFakeLag()
-        else
-            DisableFakeLag()
-        end
+        if val then EnableFakeLag() else DisableFakeLag() end
     end
 })
 
@@ -810,9 +828,7 @@ fakeLagToggle.Option:AddSlider({
     Max = 14,
     Rounding = 0,
     Type = "",
-    Callback = function(val) 
-        fakeLagLimit = val 
-    end
+    Callback = function(val) fakeLagLimit = val end
 })
 -- ==================== ESP ====================
 local ESP = {
