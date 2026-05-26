@@ -580,17 +580,6 @@ antiAimToggle.Option:AddSlider({
         yawEnabled = val ~= 0
     end
 })
-
-antiAimToggle.Option:AddDropdown({
-    Name = "Yaw base",
-    Values = {"Static", "At Target", "Spin"},
-    Default = "Static",
-    Callback = function(value)
-        local modeMap = { Static = "static", ["At Target"] = "attarget", Spin = "spin" }
-        updateAntiAimMode(modeMap[value] or "static")
-    end
-})
-
 -- Настройки Pitch (Тумблер удален, оставлен только слайдер угла с дефолтом 0)
 antiAimToggle.Option:AddSlider({
     Name = "Pitch Angle",
@@ -602,6 +591,15 @@ antiAimToggle.Option:AddSlider({
     Callback = function(val) pitchAngle = val end
 })
 
+antiAimToggle.Option:AddDropdown({
+    Name = "Yaw base",
+    Values = {"Static", "At Target", "Spin"},
+    Default = "Static",
+    Callback = function(value)
+        local modeMap = { Static = "static", ["At Target"] = "attarget", Spin = "spin" }
+        updateAntiAimMode(modeMap[value] or "static")
+    end
+})
 -- Jitter настройки
 local jitterToggle = antiAimSection:AddToggle({
     Name = "Jitter",
