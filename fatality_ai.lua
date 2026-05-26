@@ -334,21 +334,29 @@ _G.unloadAIM = unloadAIM
 local antiAimEnabled = false
 local currentMode = "static"
 local jitterEnabled = false
-local jitterMode = "Center"      -- Переименовано по умолчанию с "Jitter" на "Center"
+local jitterMode = "Center"
 local spinSpeed = 360
 local jitterRange = 30
 local jitterInterval = 0
 local jitterAccum = 0
 local yawEnabled = false
 local yawAngle = 0
+local pitchEnabled = false
+local pitchAngle = -89
 local antiAimConnection = nil
-local atTargetFallbackAngle = 0 -- Переменная для медленного вращения, если нет цели
+local atTargetFallbackAngle = 0 
 
 -- Индексы шагов для многонаправленных джиттеров
 local way3Index = 0
 local way5Index = 0
 
+-- Кэширование стандартного положения костей (чтобы не сломать персонажа)
+local lastCharacter = nil
+local defaultWaistC0 = nil
+local defaultNeckC0 = nil
+
 local function getClosestPlayer(maxDist)
+    local LocalPlayer = Players.LocalPlayer
     local character = LocalPlayer.Character
     if not character then return nil end
     local root = character:FindFirstChild("HumanoidRootPart")
@@ -383,6 +391,7 @@ end
 local function antiAimLoop(dt)
     if not antiAimEnabled then return end
 
+    local LocalPlayer = Players.LocalPlayer
     local character = LocalPlayer.Character
     if not character then return end
     local root = character:FindFirstChild("HumanoidRootPart")
@@ -390,56 +399,53 @@ local function antiAimLoop(dt)
     local humanoid = character:FindFirstChildOfClass("Humanoid")
     if not humanoid or humanoid.Health <= 0 then return end
 
+    -- Если персонаж возродился, сбрасываем кэш костей
+    if character ~= lastCharacter then
+        defaultWaistC0 = nil
+        defaultNeckC0 = nil
+        lastCharacter = character
+    end
+
     local pos = root.Position
     local currentCF = root.CFrame
-    local finalCF
+    local targetLookCF
 
+    -- ==================== 1. Вычисление базового направления (YAW) ====================
     if currentMode == "attarget" then
-        -- Ищем цель только в радиусе 500 студов
         local targetPlayer = getClosestPlayer(500) 
-        if targetPlayer then
-            local targetChar = targetPlayer.Character
-            if targetChar then
-                local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
-                if targetRoot then
-                    local targetPosFlat = Vector3.new(targetRoot.Position.X, pos.Y, targetRoot.Position.Z)
-                    finalCF = CFrame.lookAt(pos, targetPosFlat)
-                else
-                    finalCF = currentCF
-                end
-            else
-                finalCF = currentCF
-            end
+        if targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
+            local targetRoot = targetPlayer.Character.HumanoidRootPart
+            local targetPosFlat = Vector3.new(targetRoot.Position.X, pos.Y, targetRoot.Position.Z)
+            targetLookCF = CFrame.lookAt(pos, targetPosFlat)
         else
-            -- FALLBACK: Если цели нет, медленно крутимся (45 градусов в секунду)
             atTargetFallbackAngle = (atTargetFallbackAngle + math.rad(45 * dt)) % (math.pi * 2)
             local camera = Workspace.CurrentCamera
             if camera then
                 local camLook = camera.CFrame.LookVector
                 local dir = Vector3.new(camLook.X, 0, camLook.Z).Unit
-                local baseCF = CFrame.lookAt(pos, pos + dir)
-                finalCF = baseCF * CFrame.Angles(0, atTargetFallbackAngle, 0)
+                targetLookCF = CFrame.lookAt(pos, pos + dir) * CFrame.Angles(0, atTargetFallbackAngle, 0)
             else
-                finalCF = currentCF * CFrame.Angles(0, math.rad(45 * dt), 0)
+                targetLookCF = currentCF * CFrame.Angles(0, math.rad(45 * dt), 0)
             end
         end
     elseif currentMode == "spin" then
         local rotStep = math.rad(spinSpeed * dt)
-        finalCF = currentCF * CFrame.Angles(0, rotStep, 0)
+        targetLookCF = currentCF * CFrame.Angles(0, rotStep, 0)
     else -- "static"
         local camera = Workspace.CurrentCamera
         if camera then
             local camLook = camera.CFrame.LookVector
             local dir = Vector3.new(camLook.X, 0, camLook.Z).Unit
-            finalCF = CFrame.lookAt(pos, pos + dir)
+            targetLookCF = CFrame.lookAt(pos, pos + dir)
         else
-            finalCF = currentCF
+            targetLookCF = currentCF
         end
     end
 
+    -- ==================== 2. Применение Jitter и смещения (YAW) ====================
+    local yawOffset = 0
     if jitterEnabled then
         local applyJitter = false
-        local yawOffset = 0
         if jitterInterval > 0 then
             jitterAccum = jitterAccum + dt
             if jitterAccum >= jitterInterval then
@@ -452,45 +458,58 @@ local function antiAimLoop(dt)
         
         if applyJitter then
             if jitterMode == "Center" then
-                -- Рандомный разброс в пределах радиуса вокруг центра
                 yawOffset = (math.random() * 2 - 1) * math.rad(jitterRange)
             elseif jitterMode == "Random" then
-                -- Полный хаотичный разворот на 360 градусов
                 yawOffset = math.random() * 2 * math.pi
             elseif jitterMode == "3-way" then
-                -- Поочередно: Лево -> Центр -> Право
                 way3Index = (way3Index + 1) % 3
-                if way3Index == 0 then
-                    yawOffset = -math.rad(jitterRange)
-                elseif way3Index == 1 then
-                    yawOffset = 0
-                else
-                    yawOffset = math.rad(jitterRange)
-                end
+                if way3Index == 0 then yawOffset = -math.rad(jitterRange)
+                elseif way3Index == 1 then yawOffset = 0
+                else yawOffset = math.rad(jitterRange) end
             elseif jitterMode == "5-way" then
-                -- Поочередно 5 точек распределения угла
                 way5Index = (way5Index + 1) % 5
-                if way5Index == 0 then
-                    yawOffset = -math.rad(jitterRange)
-                elseif way5Index == 1 then
-                    yawOffset = -math.rad(jitterRange / 2)
-                elseif way5Index == 2 then
-                    yawOffset = 0
-                elseif way5Index == 3 then
-                    yawOffset = math.rad(jitterRange / 2)
-                else
-                    yawOffset = math.rad(jitterRange)
-                end
+                if way5Index == 0 then yawOffset = -math.rad(jitterRange)
+                elseif way5Index == 1 then yawOffset = -math.rad(jitterRange / 2)
+                elseif way5Index == 2 then yawOffset = 0
+                elseif way5Index == 3 then yawOffset = math.rad(jitterRange / 2)
+                else yawOffset = math.rad(jitterRange) end
             end
-            finalCF = finalCF * CFrame.Angles(0, yawOffset, 0)
         end
     end
 
-    if yawEnabled then
-        finalCF = finalCF * CFrame.Angles(0, math.rad(yawAngle), 0)
-    end
+    -- Собираем итоговый YAW. Важно: мы берем только поворот по Y, чтобы не наклонять физический рутпарт
+    local _, yAngle, _ = targetLookCF:ToOrientation()
+    local finalYaw = yAngle + yawOffset
+    if yawEnabled then finalYaw = finalYaw + math.rad(yawAngle) end
+    
+    -- Вращаем HumanoidRootPart СТРОГО по горизонтали
+    root.CFrame = CFrame.new(pos) * CFrame.Angles(0, finalYaw, 0)
 
-    root.CFrame = finalCF
+    -- ==================== 3. ВИЗУАЛЬНЫЙ НАКЛОН (PITCH) ====================
+    local isR15 = humanoid.RigType == Enum.HumanoidRigType.R15
+    local waist = isR15 and character:FindFirstChild("UpperTorso") and character.UpperTorso:FindFirstChild("Waist")
+    local neck = isR15 and character:FindFirstChild("Head") and character.Head:FindFirstChild("Neck")
+                 or (not isR15 and character:FindFirstChild("Torso") and character.Torso:FindFirstChild("Neck"))
+
+    -- Сохраняем начальные позиции костей, чтобы от них отсчитывать наклон
+    if waist and not defaultWaistC0 then defaultWaistC0 = waist.C0 end
+    if neck and not defaultNeckC0 then defaultNeckC0 = neck.C0 end
+
+    if pitchEnabled then
+        local pRad = math.rad(pitchAngle)
+        -- Сгибаем туловище (только R15)
+        if waist and defaultWaistC0 then
+            waist.C0 = defaultWaistC0 * CFrame.Angles(pRad, 0, 0)
+        end
+        -- Сгибаем шею (R15 и R6)
+        if neck and defaultNeckC0 then
+            neck.C0 = defaultNeckC0 * CFrame.Angles(pRad, 0, 0)
+        end
+    else
+        -- Сбрасываем кости в исходное положение
+        if waist and defaultWaistC0 then waist.C0 = defaultWaistC0 end
+        if neck and defaultNeckC0 then neck.C0 = defaultNeckC0 end
+    end
 end
 
 local function setAntiAimState(state)
@@ -500,9 +519,20 @@ local function setAntiAimState(state)
     elseif not state and antiAimConnection then
         antiAimConnection:Disconnect()
         antiAimConnection = nil
+        -- Выпрямляем персонажа при выключении Anti-Aim
+        local LocalPlayer = Players.LocalPlayer
+        local char = LocalPlayer and LocalPlayer.Character
+        if char then
+            local isR15 = char:FindFirstChildOfClass("Humanoid") and char:FindFirstChildOfClass("Humanoid").RigType == Enum.HumanoidRigType.R15
+            local waist = isR15 and char:FindFirstChild("UpperTorso") and char.UpperTorso:FindFirstChild("Waist")
+            local neck = isR15 and char:FindFirstChild("Head") and char.Head:FindFirstChild("Neck") or (not isR15 and char:FindFirstChild("Torso") and char.Torso:FindFirstChild("Neck"))
+            
+            if waist and defaultWaistC0 then waist.C0 = defaultWaistC0 end
+            if neck and defaultNeckC0 then neck.C0 = defaultNeckC0 end
+        end
     end
 end
-
+-- ==================== UI ANTI-AIM ====================
 local antiAimSection = RageTab:AddSection({
     Name = "ANTI-AIM",
     Position = 'right'
@@ -547,6 +577,25 @@ antiAimToggle.Option:AddDropdown({
     end
 })
 
+-- Pitch настройки
+local pitchToggle = antiAimSection:AddToggle({
+    Name = "Pitch (Up/Down)",
+    Default = false,
+    Option = true,
+    Callback = function(val) pitchEnabled = val end
+})
+
+pitchToggle.Option:AddSlider({
+    Name = "Angle",
+    Default = -89,
+    Min = -90,
+    Max = 90,
+    Rounding = 0,
+    Type = "°",
+    Callback = function(val) pitchAngle = val end
+})
+
+-- Jitter настройки
 local jitterToggle = antiAimSection:AddToggle({
     Name = "Jitter",
     Default = false,
@@ -572,7 +621,7 @@ jitterToggle.Option:AddSlider({
 })
 jitterToggle.Option:AddDropdown({
     Name = "Mode",
-    Values = {"Center", "3-way", "5-way", "Random"}, -- Обновленный список режимов в UI
+    Values = {"Center", "3-way", "5-way", "Random"},
     Default = "Center",
     Callback = function(val) jitterMode = val end
 })
