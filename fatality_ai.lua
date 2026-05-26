@@ -331,6 +331,11 @@ highlightToggle.Option:AddColorPicker({
 
 _G.unloadAIM = unloadAIM
 -- ==================== ANTI-AIM ====================
+local UserInputService = game:GetService("UserInputService")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
 local antiAimEnabled = false
 local currentMode = "static"
 local jitterEnabled = false
@@ -341,8 +346,9 @@ local jitterInterval = 0
 local jitterAccum = 0
 local yawEnabled = false
 local yawAngle = 0
-local pitchEnabled = false
-local pitchAngle = -89
+local pitchEnabled = true -- Функция Pitch теперь всегда включена
+local pitchAngle = 0      -- Значение по умолчанию установлено на 0
+local antiAimDownedCheck = true 
 local antiAimConnection = nil
 local atTargetFallbackAngle = 0 
 
@@ -370,6 +376,17 @@ local function getClosestPlayer(maxDist)
         if player ~= LocalPlayer then
             local targetChar = player.Character
             if targetChar then
+                -- Проверка: жив ли игрок (базовый Dead Check)
+                local humanoid = targetChar:FindFirstChildOfClass("Humanoid")
+                if not humanoid or humanoid.Health <= 0 then continue end
+                
+                -- Проверка: находится ли в состоянии нокдауна/тряпичной куклы (Downed Check)
+                if antiAimDownedCheck then
+                    if humanoid:GetState() == Enum.HumanoidStateType.Dead or humanoid:GetState() == Enum.HumanoidStateType.Physics then
+                        continue
+                    end
+                end
+
                 local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
                 if targetRoot then
                     local dist = (myPos - targetRoot.Position).Magnitude
@@ -477,12 +494,12 @@ local function antiAimLoop(dt)
         end
     end
 
-    -- Собираем итоговый YAW. Важно: мы берем только поворот по Y, чтобы не наклонять физический рутпарт
+    -- Собираем итоговый YAW
     local _, yAngle, _ = targetLookCF:ToOrientation()
     local finalYaw = yAngle + yawOffset
     if yawEnabled then finalYaw = finalYaw + math.rad(yawAngle) end
     
-    -- Вращаем HumanoidRootPart СТРОГО по горизонтали
+    -- Вращаем капсулу по горизонтали
     root.CFrame = CFrame.new(pos) * CFrame.Angles(0, finalYaw, 0)
 
     -- ==================== 3. ВИЗУАЛЬНЫЙ НАКЛОН (PITCH) ====================
@@ -491,22 +508,18 @@ local function antiAimLoop(dt)
     local neck = isR15 and character:FindFirstChild("Head") and character.Head:FindFirstChild("Neck")
                  or (not isR15 and character:FindFirstChild("Torso") and character.Torso:FindFirstChild("Neck"))
 
-    -- Сохраняем начальные позиции костей, чтобы от них отсчитывать наклон
     if waist and not defaultWaistC0 then defaultWaistC0 = waist.C0 end
     if neck and not defaultNeckC0 then defaultNeckC0 = neck.C0 end
 
     if pitchEnabled then
         local pRad = math.rad(pitchAngle)
-        -- Сгибаем туловище (только R15)
         if waist and defaultWaistC0 then
             waist.C0 = defaultWaistC0 * CFrame.Angles(pRad, 0, 0)
         end
-        -- Сгибаем шею (R15 и R6)
         if neck and defaultNeckC0 then
             neck.C0 = defaultNeckC0 * CFrame.Angles(pRad, 0, 0)
         end
     else
-        -- Сбрасываем кости в исходное положение
         if waist and defaultWaistC0 then waist.C0 = defaultWaistC0 end
         if neck and defaultNeckC0 then neck.C0 = defaultNeckC0 end
     end
@@ -519,7 +532,7 @@ local function setAntiAimState(state)
     elseif not state and antiAimConnection then
         antiAimConnection:Disconnect()
         antiAimConnection = nil
-        -- Выпрямляем персонажа при выключении Anti-Aim
+        
         local LocalPlayer = Players.LocalPlayer
         local char = LocalPlayer and LocalPlayer.Character
         if char then
@@ -532,6 +545,7 @@ local function setAntiAimState(state)
         end
     end
 end
+
 -- ==================== UI ANTI-AIM ====================
 local antiAimSection = RageTab:AddSection({
     Name = "ANTI-AIM",
@@ -577,17 +591,10 @@ antiAimToggle.Option:AddDropdown({
     end
 })
 
--- Pitch настройки
-local pitchToggle = antiAimSection:AddToggle({
-    Name = "Pitch (Up/Down)",
-    Default = false,
-    Option = true,
-    Callback = function(val) pitchEnabled = val end
-})
-
-pitchToggle.Option:AddSlider({
-    Name = "Angle",
-    Default = -89,
+-- Настройки Pitch (Тумблер удален, оставлен только слайдер угла с дефолтом 0)
+antiAimToggle.Option:AddSlider({
+    Name = "Pitch Angle",
+    Default = 0,
     Min = -90,
     Max = 90,
     Rounding = 0,
