@@ -49,6 +49,11 @@ local Lighting = game:GetService("Lighting")
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 -- ==================== AIM ====================
+local UserInputService = game:GetService("UserInputService")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
 local aimlockEnabled = false
 local activationKey = Enum.KeyCode.Z
 local currentTarget = nil
@@ -59,7 +64,8 @@ local highlight = nil
 local predictionEnabled = false
 local predictionStrength = 0.2
 local highlightEnabled = true
-local highlightColor = Color3.fromRGB(255, 255, 255)   -- белый
+local highlightColor = Color3.fromRGB(255, 255, 255)
+local aimPriority = "Crosshair" -- Crosshair, Distance
 
 -- Проверки
 local aimTeamCheck = false
@@ -68,73 +74,56 @@ local aimDownedCheck = false
 -- Подключения для очистки
 local connections = {}
 
--- Вспомогательные функции
-local function getvalues()
-    plr = Players.LocalPlayer or Players.PlayerAdded:Wait()
-    char = plr.Character or plr.CharacterAdded:Wait()
-    hrp = char:WaitForChild("HumanoidRootPart")
-    noid = char:FindFirstChildOfClass("Humanoid")
-    mouse = plr:GetMouse()
-end
-getvalues()
-
-task.spawn(function()
-    if char then
-        plr.CharacterAdded:Connect(function()
-            getvalues()
-        end)
-    end
-end)
-
--- Поиск цели по центру экрана (всегда голова) с учётом проверок
+-- Поиск цели с учетом выбранного приоритета (Безопасный, без зависаний)
 local function findTarget()
-    local camera = workspace.CurrentCamera
+    local camera = Workspace.CurrentCamera or workspace.CurrentCamera
+    if not camera then return nil end
+    
     local viewport = camera.ViewportSize
     local center = Vector2.new(viewport.X / 2, viewport.Y / 2)
     
-    local unitRay = camera:ScreenPointToRay(center.X, center.Y)
-    local params = RaycastParams.new()
-    params.FilterDescendantsInstances = { char }
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    local result = workspace:Raycast(unitRay.Origin, unitRay.Direction * 500, params)
-    if result and result.Instance then
-        local model = result.Instance:FindFirstAncestorOfClass("Model")
-        if model and model:FindFirstChild("Humanoid") and model ~= char then
-            local player = Players:GetPlayerFromCharacter(model)
-            if player then
-                if aimTeamCheck and player.Team == plr.Team then
-                    -- пропускаем союзников
-                elseif aimDownedCheck then
-                    local humanoid = model:FindFirstChildOfClass("Humanoid")
-                    if humanoid and humanoid.Health > 0 and humanoid:GetState() ~= Enum.HumanoidStateType.Dead and humanoid:GetState() ~= Enum.HumanoidStateType.Physics then
-                        return model
-                    end
-                else
-                    return model
-                end
-            end
-        end
-    end
+    local localPlayer = Players.LocalPlayer
+    local myChar = localPlayer and localPlayer.Character
+    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
     
     local closest = nil
-    local minDist = math.huge
+    local bestValue = math.huge
+    
     for _, p in pairs(Players:GetPlayers()) do
-        if p ~= plr and p.Character and p.Character:FindFirstChild("Head") then
+        if p ~= localPlayer and p.Character and p.Character:FindFirstChild("Head") then
             -- Team Check
-            if aimTeamCheck and p.Team == plr.Team then continue end
+            if aimTeamCheck and p.Team == localPlayer.Team then continue end
+            
+            local humanoid = p.Character:FindFirstChildOfClass("Humanoid")
+            if not humanoid or humanoid.Health <= 0 then continue end
+            
             -- Downed Check
             if aimDownedCheck then
-                local humanoid = p.Character:FindFirstChildOfClass("Humanoid")
-                if not humanoid or humanoid.Health <= 0 or humanoid:GetState() == Enum.HumanoidStateType.Dead or humanoid:GetState() == Enum.HumanoidStateType.Physics then
+                if humanoid:GetState() == Enum.HumanoidStateType.Dead or humanoid:GetState() == Enum.HumanoidStateType.Physics then
                     continue
                 end
             end
+            
             local head = p.Character.Head
             local screenPos, onScreen = camera:WorldToViewportPoint(head.Position)
+            
             if onScreen then
-                local dist = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
-                if dist < minDist then
-                    minDist = dist
+                local targetRoot = p.Character:FindFirstChild("HumanoidRootPart")
+                local currentValue = math.huge
+                
+                -- ОПРЕДЕЛЕНИЕ ПРИОРИТЕТА
+                if aimPriority == "Crosshair" then
+                    -- Ближе всего к центру экрана (курсору)
+                    currentValue = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
+                elseif aimPriority == "Distance" then
+                    -- Ближе всего к самому игроку в 3D пространстве
+                    if myRoot and targetRoot then
+                        currentValue = (myRoot.Position - targetRoot.Position).Magnitude
+                    end
+                end
+
+                if currentValue < bestValue then
+                    bestValue = currentValue
                     closest = p.Character
                 end
             end
@@ -145,7 +134,7 @@ end
 
 local function updateHighlight(targetChar)
     if highlight then
-        highlight:Destroy()
+        pcall(function() highlight:Destroy() end)
         highlight = nil
     end
     if targetChar and highlightEnabled then
@@ -159,7 +148,7 @@ local function updateHighlight(targetChar)
     end
 end
 
--- Обработка ввода для Aimlock
+-- Обработка ввода для Aimlock (активация по клавише)
 local inputBegan = nil
 local function setupInput()
     if inputBegan then 
@@ -189,7 +178,7 @@ local function setupInput()
 end
 setupInput()
 
--- Основной цикл Aimlock (обновление цели)
+-- Основной цикл Aimlock
 local renderStepped = RunService.RenderStepped:Connect(function()
     if aimlockEnabled and locked then
         local targetValid = false
@@ -204,6 +193,7 @@ local renderStepped = RunService.RenderStepped:Connect(function()
             end
         end
 
+        -- Автоматический поиск новой цели, если старая пропала или умерла
         if not targetValid then
             local newChar = findTarget()
             if newChar then
@@ -218,14 +208,16 @@ local renderStepped = RunService.RenderStepped:Connect(function()
         end
 
         if currentTarget and currentTarget.Parent then
-            local camera = workspace.CurrentCamera
-            local targetPos = currentTarget.Position
-            if predictionEnabled then
-                local root = currentTarget.Parent:FindFirstChild("HumanoidRootPart")
-                local velocity = root and root.Velocity or Vector3.new()
-                targetPos = targetPos + velocity * predictionStrength + Vector3.new(0, 0.1, 0)
+            local camera = Workspace.CurrentCamera or workspace.CurrentCamera
+            if camera then
+                local targetPos = currentTarget.Position
+                if predictionEnabled then
+                    local root = currentTarget.Parent:FindFirstChild("HumanoidRootPart")
+                    local velocity = root and root.Velocity or Vector3.new()
+                    targetPos = targetPos + velocity * predictionStrength + Vector3.new(0, 0.1, 0)
+                end
+                camera.CFrame = CFrame.new(camera.CFrame.Position, targetPos)
             end
-            camera.CFrame = CFrame.new(camera.CFrame.Position, targetPos)
         end
     end
 end)
@@ -252,7 +244,7 @@ local aimSection = RageTab:AddSection({
     Position = 'left'
 })
 
--- Aimlock тумблер (с опциями)
+-- Aimlock тумблер
 local aimToggle = aimSection:AddToggle({
     Name = "Aimlock",
     Default = false,
@@ -267,6 +259,7 @@ local aimToggle = aimSection:AddToggle({
     end
 })
 
+-- Старый бинд на месте
 aimToggle.Option:AddKeybind({
     Name = "Aimlock Key",
     Default = "Z",
@@ -276,6 +269,7 @@ aimToggle.Option:AddKeybind({
     end
 })
 
+-- Проверки
 aimToggle.Option:AddToggle({
     Name = "Team Check",
     Default = false,
@@ -288,14 +282,22 @@ aimToggle.Option:AddToggle({
     Callback = function(val) aimDownedCheck = val end
 })
 
--- Prediction тумблер (со слайдером силы предсказания)
+-- Выпадающий список приоритетов в самом низу меню опций аимлока
+aimToggle.Option:AddDropdown({
+    Name = "Target Priority",
+    Values = {"Crosshair", "Distance"},
+    Default = "Crosshair",
+    Callback = function(val)
+        aimPriority = val
+    end
+})
+
+-- Prediction тумблер
 local predToggle = aimSection:AddToggle({
     Name = "Prediction",
     Default = false,
     Option = true,
-    Callback = function(val)
-        predictionEnabled = val
-    end
+    Callback = function(val) predictionEnabled = val end
 })
 
 predToggle.Option:AddSlider({
@@ -304,23 +306,17 @@ predToggle.Option:AddSlider({
     Max = 100,
     Default = 100,
     Round = 0,
-    Callback = function(val)
-        predictionStrength = val / 500
-    end
+    Callback = function(val) predictionStrength = val / 500 end
 })
 
--- Highlight тумблер (с цветом)
+-- Highlight тумблер
 local highlightToggle = aimSection:AddToggle({
     Name = "Highlight",
     Default = true,
     Option = true,
     Callback = function(val)
         highlightEnabled = val
-        if currentTarget then
-            updateHighlight(currentTarget.Parent)
-        else
-            updateHighlight(nil)
-        end
+        if currentTarget then updateHighlight(currentTarget.Parent) else updateHighlight(nil) end
     end
 })
 
@@ -329,9 +325,7 @@ highlightToggle.Option:AddColorPicker({
     Default = highlightColor,
     Callback = function(color)
         highlightColor = color
-        if highlight then
-            highlight.FillColor = color
-        end
+        if highlight then highlight.FillColor = color end
     end
 })
 
