@@ -338,25 +338,36 @@ local Workspace = game:GetService("Workspace")
 
 local antiAimEnabled = false
 local currentMode = "static"
-local jitterEnabled = false
-local jitterMode = "Center"
 local spinSpeed = 360
-local jitterRange = 30
-local jitterInterval = 0
-local jitterAccum = 0
 local yawEnabled = false
 local yawAngle = 0
-local pitchEnabled = true -- Функция Pitch теперь всегда включена
-local pitchAngle = 0      -- Значение по умолчанию установлено на 0
+local pitchEnabled = true 
+local pitchAngle = 0      
 local antiAimDownedCheck = true 
 local antiAimConnection = nil
 local atTargetFallbackAngle = 0 
 
--- Индексы шагов для многонаправленных джиттеров
-local way3Index = 0
-local way5Index = 0
+-- Настройки YAW Jitter
+local yawJitterEnabled = false
+local yawJitterMode = "Center"
+local yawJitterRange = 30
+local yawJitterInterval = 0
+local yawJitterAccum = 0
+local yawJitterOffset = 0
+local way3IndexYaw = 0
+local way5IndexYaw = 0
 
--- Кэширование стандартного положения костей (чтобы не сломать персонажа)
+-- Настройки PITCH Jitter
+local pitchJitterEnabled = false
+local pitchJitterMode = "Center"
+local pitchJitterRange = 30
+local pitchJitterInterval = 0
+local pitchJitterAccum = 0
+local pitchJitterOffset = 0
+local way3IndexPitch = 0
+local way5IndexPitch = 0
+
+-- Кэширование стандартного положения костей
 local lastCharacter = nil
 local defaultWaistC0 = nil
 local defaultNeckC0 = nil
@@ -376,11 +387,9 @@ local function getClosestPlayer(maxDist)
         if player ~= LocalPlayer then
             local targetChar = player.Character
             if targetChar then
-                -- Проверка: жив ли игрок (базовый Dead Check)
                 local humanoid = targetChar:FindFirstChildOfClass("Humanoid")
                 if not humanoid or humanoid.Health <= 0 then continue end
                 
-                -- Проверка: находится ли в состоянии нокдауна/тряпичной куклы (Downed Check)
                 if antiAimDownedCheck then
                     if humanoid:GetState() == Enum.HumanoidStateType.Dead or humanoid:GetState() == Enum.HumanoidStateType.Physics then
                         continue
@@ -416,7 +425,6 @@ local function antiAimLoop(dt)
     local humanoid = character:FindFirstChildOfClass("Humanoid")
     if not humanoid or humanoid.Health <= 0 then return end
 
-    -- Если персонаж возродился, сбрасываем кэш костей
     if character ~= lastCharacter then
         defaultWaistC0 = nil
         defaultNeckC0 = nil
@@ -448,7 +456,7 @@ local function antiAimLoop(dt)
     elseif currentMode == "spin" then
         local rotStep = math.rad(spinSpeed * dt)
         targetLookCF = currentCF * CFrame.Angles(0, rotStep, 0)
-    else -- "static"
+    else 
         local camera = Workspace.CurrentCamera
         if camera then
             local camLook = camera.CFrame.LookVector
@@ -459,14 +467,13 @@ local function antiAimLoop(dt)
         end
     end
 
-    -- ==================== 2. Применение Jitter и смещения (YAW) ====================
-    local yawOffset = 0
-    if jitterEnabled then
+    -- ==================== 2. Применение Yaw Jitter ====================
+    if yawJitterEnabled then
         local applyJitter = false
-        if jitterInterval > 0 then
-            jitterAccum = jitterAccum + dt
-            if jitterAccum >= jitterInterval then
-                jitterAccum = 0
+        if yawJitterInterval > 0 then
+            yawJitterAccum = yawJitterAccum + dt
+            if yawJitterAccum >= yawJitterInterval then
+                yawJitterAccum = 0
                 applyJitter = true
             end
         else
@@ -474,35 +481,71 @@ local function antiAimLoop(dt)
         end
         
         if applyJitter then
-            if jitterMode == "Center" then
-                yawOffset = (math.random() * 2 - 1) * math.rad(jitterRange)
-            elseif jitterMode == "Random" then
-                yawOffset = math.random() * 2 * math.pi
-            elseif jitterMode == "3-way" then
-                way3Index = (way3Index + 1) % 3
-                if way3Index == 0 then yawOffset = -math.rad(jitterRange)
-                elseif way3Index == 1 then yawOffset = 0
-                else yawOffset = math.rad(jitterRange) end
-            elseif jitterMode == "5-way" then
-                way5Index = (way5Index + 1) % 5
-                if way5Index == 0 then yawOffset = -math.rad(jitterRange)
-                elseif way5Index == 1 then yawOffset = -math.rad(jitterRange / 2)
-                elseif way5Index == 2 then yawOffset = 0
-                elseif way5Index == 3 then yawOffset = math.rad(jitterRange / 2)
-                else yawOffset = math.rad(jitterRange) end
+            if yawJitterMode == "Center" then
+                yawJitterOffset = (math.random() * 2 - 1) * math.rad(yawJitterRange)
+            elseif yawJitterMode == "Random" then
+                yawJitterOffset = math.random() * 2 * math.pi
+            elseif yawJitterMode == "3-way" then
+                way3IndexYaw = (way3IndexYaw + 1) % 3
+                if way3IndexYaw == 0 then yawJitterOffset = -math.rad(yawJitterRange)
+                elseif way3IndexYaw == 1 then yawJitterOffset = 0
+                else yawJitterOffset = math.rad(yawJitterRange) end
+            elseif yawJitterMode == "5-way" then
+                way5IndexYaw = (way5IndexYaw + 1) % 5
+                if way5IndexYaw == 0 then yawJitterOffset = -math.rad(yawJitterRange)
+                elseif way5IndexYaw == 1 then yawJitterOffset = -math.rad(yawJitterRange / 2)
+                elseif way5IndexYaw == 2 then yawJitterOffset = 0
+                elseif way5IndexYaw == 3 then yawJitterOffset = math.rad(yawJitterRange / 2)
+                else yawJitterOffset = math.rad(yawJitterRange) end
             end
         end
+    else
+        yawJitterOffset = 0
     end
 
-    -- Собираем итоговый YAW
+    -- Собираем итоговый YAW и вращаем капсулу по горизонтали
     local _, yAngle, _ = targetLookCF:ToOrientation()
-    local finalYaw = yAngle + yawOffset
+    local finalYaw = yAngle + yawJitterOffset
     if yawEnabled then finalYaw = finalYaw + math.rad(yawAngle) end
-    
-    -- Вращаем капсулу по горизонтали
     root.CFrame = CFrame.new(pos) * CFrame.Angles(0, finalYaw, 0)
 
-    -- ==================== 3. ВИЗУАЛЬНЫЙ НАКЛОН (PITCH) ====================
+    -- ==================== 3. Применение Pitch Jitter ====================
+    if pitchJitterEnabled then
+        local applyJitter = false
+        if pitchJitterInterval > 0 then
+            pitchJitterAccum = pitchJitterAccum + dt
+            if pitchJitterAccum >= pitchJitterInterval then
+                pitchJitterAccum = 0
+                applyJitter = true
+            end
+        else
+            applyJitter = true
+        end
+        
+        if applyJitter then
+            if pitchJitterMode == "Center" then
+                pitchJitterOffset = (math.random() * 2 - 1) * pitchJitterRange
+            elseif pitchJitterMode == "Random" then
+                pitchJitterOffset = (math.random() * 2 - 1) * 90
+            elseif pitchJitterMode == "3-way" then
+                way3IndexPitch = (way3IndexPitch + 1) % 3
+                if way3IndexPitch == 0 then pitchJitterOffset = -pitchJitterRange
+                elseif way3IndexPitch == 1 then pitchJitterOffset = 0
+                else pitchJitterOffset = pitchJitterRange end
+            elseif pitchJitterMode == "5-way" then
+                way5IndexPitch = (way5IndexPitch + 1) % 5
+                if way5IndexPitch == 0 then pitchJitterOffset = -pitchJitterRange
+                elseif way5IndexPitch == 1 then pitchJitterOffset = -pitchJitterRange / 2
+                elseif way5IndexPitch == 2 then pitchJitterOffset = 0
+                elseif way5IndexPitch == 3 then pitchJitterOffset = pitchJitterRange / 2
+                else pitchJitterOffset = pitchJitterRange end
+            end
+        end
+    else
+        pitchJitterOffset = 0
+    end
+
+    -- ==================== 4. ВИЗУАЛЬНЫЙ НАКЛОН И СГИБАНИЕ КОСТЕЙ ====================
     local isR15 = humanoid.RigType == Enum.HumanoidRigType.R15
     local waist = isR15 and character:FindFirstChild("UpperTorso") and character.UpperTorso:FindFirstChild("Waist")
     local neck = isR15 and character:FindFirstChild("Head") and character.Head:FindFirstChild("Neck")
@@ -512,13 +555,10 @@ local function antiAimLoop(dt)
     if neck and not defaultNeckC0 then defaultNeckC0 = neck.C0 end
 
     if pitchEnabled then
-        local pRad = math.rad(pitchAngle)
-        if waist and defaultWaistC0 then
-            waist.C0 = defaultWaistC0 * CFrame.Angles(pRad, 0, 0)
-        end
-        if neck and defaultNeckC0 then
-            neck.C0 = defaultNeckC0 * CFrame.Angles(pRad, 0, 0)
-        end
+        local finalPitchDeg = math.clamp(pitchAngle + pitchJitterOffset, -90, 90)
+        local pRad = math.rad(finalPitchDeg)
+        if waist and defaultWaistC0 then waist.C0 = defaultWaistC0 * CFrame.Angles(pRad, 0, 0) end
+        if neck and defaultNeckC0 then neck.C0 = defaultNeckC0 * CFrame.Angles(pRad, 0, 0) end
     else
         if waist and defaultWaistC0 then waist.C0 = defaultWaistC0 end
         if neck and defaultNeckC0 then neck.C0 = defaultNeckC0 end
@@ -545,7 +585,6 @@ local function setAntiAimState(state)
         end
     end
 end
-
 -- ==================== UI ANTI-AIM ====================
 local antiAimSection = RageTab:AddSection({
     Name = "ANTI-AIM",
@@ -580,7 +619,7 @@ antiAimToggle.Option:AddSlider({
         yawEnabled = val ~= 0
     end
 })
--- Настройки Pitch (Тумблер удален, оставлен только слайдер угла с дефолтом 0)
+
 antiAimToggle.Option:AddSlider({
     Name = "Pitch Angle",
     Default = 0,
@@ -600,35 +639,66 @@ antiAimToggle.Option:AddDropdown({
         updateAntiAimMode(modeMap[value] or "static")
     end
 })
--- Jitter настройки
-local jitterToggle = antiAimSection:AddToggle({
-    Name = "Jitter",
+-- НАСТРОЙКИ YAW JITTER
+local yawJitterToggle = antiAimSection:AddToggle({
+    Name = "Yaw jitter",
     Default = false,
     Option = true,
-    Callback = function(val) jitterEnabled = val end
+    Callback = function(val) yawJitterEnabled = val end
 })
-jitterToggle.Option:AddSlider({
+yawJitterToggle.Option:AddSlider({
     Name = "Range",
     Default = 30,
     Min = 1,
-    Max = 90,
+    Max = 180,
     Type = "°",
-    Callback = function(val) jitterRange = val end
+    Callback = function(val) yawJitterRange = val end
 })
-jitterToggle.Option:AddSlider({
+yawJitterToggle.Option:AddSlider({
     Name = "Delay",
     Default = 0,
     Min = 0,
     Max = 500,
     Rounding = 0,
     Type = "ms",
-    Callback = function(val) jitterInterval = val / 1000 end
+    Callback = function(val) yawJitterInterval = val / 1000 end
 })
-jitterToggle.Option:AddDropdown({
+yawJitterToggle.Option:AddDropdown({
     Name = "Mode",
     Values = {"Center", "3-way", "5-way", "Random"},
     Default = "Center",
-    Callback = function(val) jitterMode = val end
+    Callback = function(val) yawJitterMode = val end
+})
+
+-- НАСТРОЙКИ PITCH JITTER
+local pitchJitterToggle = antiAimSection:AddToggle({
+    Name = "Pitch jitter",
+    Default = false,
+    Option = true,
+    Callback = function(val) pitchJitterEnabled = val end
+})
+pitchJitterToggle.Option:AddSlider({
+    Name = "Range",
+    Default = 30,
+    Min = 1,
+    Max = 90,
+    Type = "°",
+    Callback = function(val) pitchJitterRange = val end
+})
+pitchJitterToggle.Option:AddSlider({
+    Name = "Delay",
+    Default = 0,
+    Min = 0,
+    Max = 500,
+    Rounding = 0,
+    Type = "ms",
+    Callback = function(val) pitchJitterInterval = val / 1000 end
+})
+pitchJitterToggle.Option:AddDropdown({
+    Name = "Mode",
+    Values = {"Center", "3-way", "5-way", "Random"},
+    Default = "Center",
+    Callback = function(val) pitchJitterMode = val end
 })
 -- ==================== FAKE LAG (серверная часть – прозрачный силуэт с обводкой) ====================
 local Player = game:GetService("Players").LocalPlayer
