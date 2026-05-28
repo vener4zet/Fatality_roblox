@@ -344,8 +344,11 @@ local yawAngle = 0
 local pitchEnabled = true 
 local pitchAngle = 0      
 local antiAimDownedCheck = true 
-local antiAimConnection = nil
 local atTargetFallbackAngle = 0 
+
+-- Коннекты разделены для физики и анимаций
+local antiAimRenderConn = nil
+local antiAimSteppedConn = nil
 
 -- Настройки YAW Jitter
 local yawJitterEnabled = false
@@ -366,11 +369,6 @@ local pitchJitterAccum = 0
 local pitchJitterOffset = 0
 local way3IndexPitch = 0
 local way5IndexPitch = 0
-
--- Кэширование стандартного положения костей
-local lastCharacter = nil
-local defaultWaistC0 = nil
-local defaultNeckC0 = nil
 
 local function getClosestPlayer(maxDist)
     local LocalPlayer = Players.LocalPlayer
@@ -414,7 +412,8 @@ local function updateAntiAimMode(newMode)
     currentMode = newMode
 end
 
-local function antiAimLoop(dt)
+-- ==================== 1. ЛОГИКА YAW (Вращение RootPart - Видят все) ====================
+local function antiAimMain(dt)
     if not antiAimEnabled then return end
 
     local LocalPlayer = Players.LocalPlayer
@@ -425,17 +424,10 @@ local function antiAimLoop(dt)
     local humanoid = character:FindFirstChildOfClass("Humanoid")
     if not humanoid or humanoid.Health <= 0 then return end
 
-    if character ~= lastCharacter then
-        defaultWaistC0 = nil
-        defaultNeckC0 = nil
-        lastCharacter = character
-    end
-
     local pos = root.Position
     local currentCF = root.CFrame
     local targetLookCF
 
-    -- ==================== 1. Вычисление базового направления (YAW) ====================
     if currentMode == "attarget" then
         local targetPlayer = getClosestPlayer(500) 
         if targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
@@ -467,7 +459,7 @@ local function antiAimLoop(dt)
         end
     end
 
-    -- ==================== 2. Применение Yaw Jitter ====================
+    -- Подсчет Yaw Jitter
     if yawJitterEnabled then
         local applyJitter = false
         if yawJitterInterval > 0 then
@@ -503,13 +495,7 @@ local function antiAimLoop(dt)
         yawJitterOffset = 0
     end
 
-    -- Собираем итоговый YAW и вращаем капсулу по горизонтали
-    local _, yAngle, _ = targetLookCF:ToOrientation()
-    local finalYaw = yAngle + yawJitterOffset
-    if yawEnabled then finalYaw = finalYaw + math.rad(yawAngle) end
-    root.CFrame = CFrame.new(pos) * CFrame.Angles(0, finalYaw, 0)
-
-    -- ==================== 3. Применение Pitch Jitter ====================
+    -- Подсчет Pitch Jitter (Для применения в следующем блоке)
     if pitchJitterEnabled then
         local applyJitter = false
         if pitchJitterInterval > 0 then
@@ -545,46 +531,80 @@ local function antiAimLoop(dt)
         pitchJitterOffset = 0
     end
 
-    -- ==================== 4. ВИЗУАЛЬНЫЙ НАКЛОН И СГИБАНИЕ КОСТЕЙ ====================
-    local isR15 = humanoid.RigType == Enum.HumanoidRigType.R15
-    local waist = isR15 and character:FindFirstChild("UpperTorso") and character.UpperTorso:FindFirstChild("Waist")
-    local neck = isR15 and character:FindFirstChild("Head") and character.Head:FindFirstChild("Neck")
-                 or (not isR15 and character:FindFirstChild("Torso") and character.Torso:FindFirstChild("Neck"))
-
-    if waist and not defaultWaistC0 then defaultWaistC0 = waist.C0 end
-    if neck and not defaultNeckC0 then defaultNeckC0 = neck.C0 end
-
-    if pitchEnabled then
-        local finalPitchDeg = math.clamp(pitchAngle + pitchJitterOffset, -90, 90)
-        local pRad = math.rad(finalPitchDeg)
-        if waist and defaultWaistC0 then waist.C0 = defaultWaistC0 * CFrame.Angles(pRad, 0, 0) end
-        if neck and defaultNeckC0 then neck.C0 = defaultNeckC0 * CFrame.Angles(pRad, 0, 0) end
-    else
-        if waist and defaultWaistC0 then waist.C0 = defaultWaistC0 end
-        if neck and defaultNeckC0 then neck.C0 = defaultNeckC0 end
-    end
+    -- Применение YAW к Рутпарту
+    local _, yAngle, _ = targetLookCF:ToOrientation()
+    local finalYaw = yAngle + yawJitterOffset
+    if yawEnabled then finalYaw = finalYaw + math.rad(yawAngle) end
+    root.CFrame = CFrame.new(pos) * CFrame.Angles(0, finalYaw, 0)
 end
 
-local function setAntiAimState(state)
-    antiAimEnabled = state
-    if state and not antiAimConnection then
-        antiAimConnection = RunService.RenderStepped:Connect(antiAimLoop)
-    elseif not state and antiAimConnection then
-        antiAimConnection:Disconnect()
-        antiAimConnection = nil
-        
-        local LocalPlayer = Players.LocalPlayer
-        local char = LocalPlayer and LocalPlayer.Character
-        if char then
-            local isR15 = char:FindFirstChildOfClass("Humanoid") and char:FindFirstChildOfClass("Humanoid").RigType == Enum.HumanoidRigType.R15
-            local waist = isR15 and char:FindFirstChild("UpperTorso") and char.UpperTorso:FindFirstChild("Waist")
-            local neck = isR15 and char:FindFirstChild("Head") and char.Head:FindFirstChild("Neck") or (not isR15 and char:FindFirstChild("Torso") and char.Torso:FindFirstChild("Neck"))
-            
-            if waist and defaultWaistC0 then waist.C0 = defaultWaistC0 end
-            if neck and defaultNeckC0 then neck.C0 = defaultNeckC0 end
+-- ==================== 2. ЛОГИКА PITCH (Перезапись анимаций костей) ====================
+local function antiAimBones()
+    if not antiAimEnabled or not pitchEnabled then return end
+    
+    local player = Players.LocalPlayer
+    local activeChar = player.Character
+    -- Ищем настоящее серверное тело с хайлайтом (оно остается под твоим ником при Fake Lag)
+    local realChar = Workspace:FindFirstChild(player.Name)
+
+    -- Собираем обе модельки в список, чтобы согнуть их синхронно
+    local charsToBend = {}
+    if activeChar then table.insert(charsToBend, activeChar) end
+    if realChar and realChar ~= activeChar then table.insert(charsToBend, realChar) end
+
+    local finalPitchDeg = math.clamp(pitchAngle + pitchJitterOffset, -90, 90)
+    local pRad = math.rad(finalPitchDeg)
+
+    for _, char in ipairs(charsToBend) do
+        local humanoid = char:FindFirstChildOfClass("Humanoid")
+        if humanoid and humanoid.Health > 0 then
+            local neck = char:FindFirstChild("Neck", true)
+            local waist = char:FindFirstChild("Waist", true)
+
+            -- Накладываем наклон на кости каждой найденной модельки
+            if waist then
+                waist.Transform = waist.Transform * CFrame.Angles(pRad, 0, 0)
+            end
+            if neck then
+                neck.Transform = neck.Transform * CFrame.Angles(pRad, 0, 0)
+            end
         end
     end
 end
+
+-- Основная функция управления состояниями (Вкл/Выкл)
+local function setAntiAimState(state)
+    antiAimEnabled = state
+    if state then
+        -- RenderStepped для перемещения хитбокса (Yaw)
+        if not antiAimRenderConn then
+            antiAimRenderConn = RunService.RenderStepped:Connect(antiAimMain)
+        end
+        -- Stepped для модификации костей без конфликта с анимациями (Pitch)
+        if not antiAimSteppedConn then
+            antiAimSteppedConn = RunService.Stepped:Connect(antiAimBones)
+        end
+    else
+        if antiAimRenderConn then 
+            antiAimRenderConn:Disconnect()
+            antiAimRenderConn = nil 
+        end
+        if antiAimSteppedConn then 
+            antiAimSteppedConn:Disconnect()
+            antiAimSteppedConn = nil 
+        end
+        -- Нам больше не нужно принудительно возвращать кости на место.
+        -- Как только мы отключаем Stepped коннект, движок Роблокса моментально
+        -- выпрямляет персонажа в его дефолтную анимацию.
+    end
+end
+
+-- Глобальная очистка для кнопки Unload Script
+local function unloadAntiAim()
+    setAntiAimState(false)
+end
+_G.unloadAntiAim = unloadAntiAim
+
 -- ==================== UI ANTI-AIM ====================
 local antiAimSection = RageTab:AddSection({
     Name = "ANTI-AIM",
@@ -620,6 +640,16 @@ antiAimToggle.Option:AddSlider({
     end
 })
 
+antiAimToggle.Option:AddDropdown({
+    Name = "Yaw base",
+    Values = {"Static", "At Target", "Spin"},
+    Default = "Static",
+    Callback = function(value)
+        local modeMap = { Static = "static", ["At Target"] = "attarget", Spin = "spin" }
+        updateAntiAimMode(modeMap[value] or "static")
+    end
+})
+
 antiAimToggle.Option:AddSlider({
     Name = "Pitch Angle",
     Default = 0,
@@ -630,15 +660,6 @@ antiAimToggle.Option:AddSlider({
     Callback = function(val) pitchAngle = val end
 })
 
-antiAimToggle.Option:AddDropdown({
-    Name = "Yaw base",
-    Values = {"Static", "At Target", "Spin"},
-    Default = "Static",
-    Callback = function(value)
-        local modeMap = { Static = "static", ["At Target"] = "attarget", Spin = "spin" }
-        updateAntiAimMode(modeMap[value] or "static")
-    end
-})
 -- НАСТРОЙКИ YAW JITTER
 local yawJitterToggle = antiAimSection:AddToggle({
     Name = "Yaw jitter",
@@ -1937,7 +1958,6 @@ ScriptSettingsSection:AddButton({
         pcall(function()
             -- Выключаем Fake Lag
             if DisableFakeLag then DisableFakeLag() end
-            
             -- Отключаем глобальный тумблер ESP, если он есть в скрипте
             if ESP then ESP.Enabled = false end
             if espConnection then espConnection:Disconnect() end
@@ -2023,8 +2043,8 @@ ScriptSettingsSection:AddButton({
                 end
             end
 
-            -- Выключаем Anti-Aim
-            if antiAimConnection then antiAimConnection:Disconnect() end
+            -- Выключаем Anti-Aim и полностью выпрямляем спину
+            if _G.unloadAntiAim then _G.unloadAntiAim() end
             
             -- Выключаем Aimlock
             if _G.unloadAIM then _G.unloadAIM() end
